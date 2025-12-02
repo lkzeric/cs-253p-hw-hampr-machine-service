@@ -22,6 +22,23 @@ export class ApiHandler {
      */
     private checkToken(token: string) {
         // Your implementation here
+        if (!token) {
+            throw new Error(JSON.stringify({
+                statusCode: HttpResponseCode.UNAUTHORIZED,
+                message: "Invalid token"
+            }));
+        }
+
+        const idp = IdentityProviderClient.getInstance();
+
+        const isValid = idp.validateToken(token);
+
+        if (!isValid) {
+            throw new Error(JSON.stringify({
+                statusCode: HttpResponseCode.UNAUTHORIZED,
+                message: "Invalid token"
+            }));
+        }
     }
 
     /**
@@ -35,6 +52,31 @@ export class ApiHandler {
      */
     private handleRequestMachine(request: RequestMachineRequestModel): MachineResponseModel {
         // Your implementation here
+        const table = MachineStateTable.getInstance();
+        const machinesAtLocation = table.listMachinesAtLocation(request.locationId);
+
+        const availableMachine = machinesAtLocation.find(
+            (m) => m.status === MachineStatus.AVAILABLE
+        );
+
+        if (!availableMachine) {
+            return {
+                statusCode: HttpResponseCode.NOT_FOUND,
+                machine: undefined,
+            };
+        }
+
+        table.updateMachineStatus(availableMachine.machineId, MachineStatus.AWAITING_DROPOFF);
+        table.updateMachineJobId(availableMachine.machineId, request.jobId);
+
+        const updated = table.getMachine(availableMachine.machineId)!;
+
+        this.cache.put(updated.machineId, updated);
+
+        return {
+            statusCode: HttpResponseCode.OK,
+            machine: updated,
+        };
     }
 
     /**
@@ -45,6 +87,28 @@ export class ApiHandler {
      */
     private handleGetMachine(request: GetMachineRequestModel): MachineResponseModel {
         // Your implementation here
+        const machineId = request.machineId;
+        const cached = this.cache.get(machineId);
+        if (cached) {
+            return {
+                statusCode: HttpResponseCode.OK,
+                machine: cached,
+            };
+        }
+        const table = MachineStateTable.getInstance();
+        const machine = table.getMachine(machineId);
+
+        if (!machine) {
+            return {
+                statusCode: HttpResponseCode.NOT_FOUND,
+                machine: undefined,
+            };
+        }
+        this.cache.put(machineId, machine);
+        return {
+            statusCode: HttpResponseCode.OK,
+            machine,
+        };
     }
 
     /**
@@ -56,6 +120,47 @@ export class ApiHandler {
      */
     private handleStartMachine(request: StartMachineRequestModel): MachineResponseModel {
         // Your implementation here
+        const machineId = request.machineId;
+        const table = MachineStateTable.getInstance();
+
+        const current = table.getMachine(machineId);
+        if (!current) {
+            return {
+                statusCode: HttpResponseCode.NOT_FOUND,
+                machine: undefined,
+            };
+        }
+
+        if (current.status !== MachineStatus.AWAITING_DROPOFF) {
+            return {
+                statusCode: HttpResponseCode.BAD_REQUEST,
+                machine: current,
+            };
+        }
+
+        const smartClient = SmartMachineClient.getInstance();
+
+        try {
+            smartClient.startCycle(machineId);
+            table.updateMachineStatus(machineId, MachineStatus.RUNNING);
+            const updated = table.getMachine(machineId)!;
+            this.cache.put(updated.machineId, updated);
+
+            return {
+                statusCode: HttpResponseCode.OK,
+                machine: updated,
+            };
+        } catch (e) {
+            table.updateMachineStatus(machineId, MachineStatus.ERROR);
+            const errorMachine = table.getMachine(machineId)!;
+
+            this.cache.put(errorMachine.machineId, errorMachine);
+
+            return {
+                statusCode: HttpResponseCode.HARDWARE_ERROR,
+                machine: errorMachine,
+            };
+        }
     }
 
     /**
